@@ -1,0 +1,686 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../app/generated/prisma"
+  engineType = "binary"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+
+// ── ENUMS ────────────────────────────────────────────────────────
+
+enum StudentSource {
+  WEBHOOK  // legacy external webhook integrations
+  WEBSITE  // public website registration (Supabase edge function)
+  MANUAL   // registered directly in admin app
+}
+
+enum EnrollmentStatus {
+  UNASSIGNED  // pending admin assignment to a batch
+  ACTIVE
+  SUSPENDED   // temporarily suspended — can be re-activated
+  ON_HOLD     // on temporary hold — different from suspension
+  COMPLETED
+  DROPPED
+}
+
+enum BatchStatus {
+  OPEN       // accepting new registrations
+  ACTIVE     // running — registrations closed, sessions in progress
+  CLOSED     // legacy / dead value — not used in new code
+  COMPLETED  // all sessions done, batch finished
+}
+
+enum SessionStatus {
+  SCHEDULED
+  COMPLETED
+  CANCELLED
+  RESCHEDULED
+}
+
+enum InstallmentStatus {
+  PENDING
+  PARTIAL
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+enum TransferSettlementKind {
+  CREDIT_NOTE
+  APPLY_TO_NEW
+  REFUND_RECORD
+  MANUAL_ADJUSTMENT
+}
+
+enum PaymentMethod {
+  CASH
+  BANK_TRANSFER
+  CARD
+  CHEQUE
+  OTHER
+}
+
+enum AttendanceSource {
+  STUDENT  // self-marked via student portal
+  ADMIN    // marked from admin dashboard
+}
+
+enum AttendanceStatus {
+  PRESENT
+  ABSENT
+  LATE
+}
+
+enum EnrollmentPaymentPath {
+  INSTALLMENT
+  ONE_TIME
+}
+
+enum EnrollmentInstallmentSource {
+  BATCH
+  NAMED_PLAN
+  CUSTOM
+}
+
+// ── ADMIN ────────────────────────────────────────────────────────
+// Multiple admin accounts, all with equal access.
+
+model Admin {
+  id         String   @id @default(cuid())
+  supabaseId String   @unique  // maps to auth.users.id
+  email      String   @unique
+  name       String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  recordedPayments     Payment[]             @relation("PaymentRecordedBy")
+  voidedPayments       Payment[]             @relation("PaymentVoidedBy")
+  transferSettlements  TransferSettlement[]
+
+  @@map("admins")
+}
+
+// ── BRANCH ───────────────────────────────────────────────────────
+
+model Branch {
+  id         String   @id @default(cuid())
+  branchCode String   @unique
+  name       String
+  location   String
+  isActive   Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  classDays BranchClassDay[]
+  batches   Batch[]
+  sessions  Session[]   // sessions physically held at this branch
+  students  Student[]   // students whose preferred branch is this
+
+  @@index([isActive, name])
+  @@map("branches")
+}
+
+// Which weekdays this branch runs classes (e.g. Saturday, Sunday).
+// Session date/time is managed on Session — not stored here.
+model BranchClassDay {
+  id        String   @id @default(cuid())
+  branchId  String
+  branch    Branch   @relation(fields: [branchId], references: [id])
+  dayOfWeek Int      // 0=Sun 1=Mon 2=Tue 3=Wed 4=Thu 5=Fri 6=Sat
+  createdAt DateTime @default(now())
+
+  @@unique([branchId, dayOfWeek])
+  @@map("branch_class_days")
+}
+
+// ── BATCH (INTAKE) ───────────────────────────────────────────────
+
+model Batch {
+  id               String      @id @default(cuid())
+  batchCode        String      @unique  // auto-generated: COL-2025-JAN
+  name             String               // e.g. "January 2025 Intake"
+  branchId         String
+  branch           Branch      @relation(fields: [branchId], references: [id])
+  startDate        DateTime
+  endDate          DateTime
+  defaultClassTime String?              // "09:00" — default start time applied to sessions
+  defaultClassEndTime String?           // "12:00" — optional default end time for sessions
+  status           BatchStatus @default(OPEN)
+  totalSessions    Int         @default(0)
+  maxCapacity      Int?                 // optional seat cap for enrollment
+  registrationFee  Decimal     @db.Decimal(10,2)
+  courseFee        Decimal     @db.Decimal(10,2)  // default, overridable per student
+  paymentPlanId    String?
+  paymentPlan      PaymentPlan? @relation(fields: [paymentPlanId], references: [id])
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+
+  sessions             Session[]
+  enrollments          Enrollment[]
+  installmentTemplates InstallmentTemplate[]
+  alumniAsCurrent      Alumni[]              @relation("AlumniBatch")
+  alumniAsPrevious     Alumni[]              @relation("AlumniPreviousBatch")
+
+  @@index([branchId, status])
+  @@index([paymentPlanId])
+  @@map("batches")
+}
+
+// ── INSTALLMENT TEMPLATE ─────────────────────────────────────────
+// Admin defines the installment plan when creating a batch.
+// Rows are copied to individual Installment rows per enrollment.
+
+model InstallmentTemplate {
+  id        String   @id @default(cuid())
+  batchId   String
+  batch     Batch    @relation(fields: [batchId], references: [id])
+  label     String   // e.g. "Installment 1", "Final Payment"
+  amount    Decimal  @db.Decimal(10,2)
+  dueDate   DateTime
+  order     Int      // display/payment order
+  createdAt DateTime @default(now())
+
+  @@index([batchId])
+  @@map("installment_templates")
+}
+
+// ── SESSION ──────────────────────────────────────────────────────
+// Pre-generated when a batch is created (from BranchClassDay).
+// branchId = physical location of the session.
+// Normally session.branchId == session.batch.branchId,
+// but can differ if admin relocates the session to another branch.
+
+model Session {
+  id            String        @id @default(cuid())
+  batchId       String
+  batch         Batch         @relation(fields: [batchId], references: [id])
+  branchId      String        // physical location of this session
+  branch        Branch        @relation(fields: [branchId], references: [id])
+  sessionNumber Int           // 1 to totalSessions
+  scheduledAt   DateTime
+  status        SessionStatus @default(SCHEDULED)
+  pin           String?       // student self-attendance PIN
+  notes         String?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  attendances            Attendance[]
+  sessionStudentMessages SessionStudentMessage[]
+
+  @@index([branchId, status, scheduledAt])
+  @@index([batchId, sessionNumber])
+  @@map("sessions")
+}
+
+// ── STUDENT ──────────────────────────────────────────────────────
+
+model Student {
+  id                String        @id @default(cuid())
+  supabaseId        String?       @unique  // set after portal invite is accepted
+  modelCode         String        @unique  // from webhook payload OR auto-generated
+  source            StudentSource @default(MANUAL)
+
+  // Personal info (operational / searchable where noted)
+  age               Int
+  photoUrl          String?       // Supabase Storage URL
+
+  // Identity & ops (plaintext — searchable in admin UI)
+  fullName          String
+  email             String   @unique
+  gender            String
+
+  // Encrypted sensitive PII (AES-256-GCM). See docs/PII_ENCRYPTION.md
+  nicEnc              String
+  nicHash             String   @unique
+  dobEnc              String
+  addressEnc          String
+  contactNumberEnc    String
+  whatsappNumberEnc   String
+  heightEnc           String?
+  weightEnc           String?
+  chestEnc            String?
+  shoulderEnc         String?
+  waistEnc            String?
+  shoeSizeEnc         String?
+  skinColorOptionId   String?
+  skinColorOption     RegistrationSkinColorOption? @relation(fields: [skinColorOptionId], references: [id])
+  eyeColorEnc         String?
+  hairColorEnc        String?
+  talentsEnc          String?
+
+  loginDisabledNote  String?
+  preferredBranchRaw String?
+  preferredDate      String?
+  fcmToken           String?
+
+  preferredBranchId  String?
+  preferredBranch    Branch?       @relation(fields: [preferredBranchId], references: [id])
+
+  isLoginEnabled    Boolean       @default(false)
+
+  createdAt         DateTime      @default(now())
+  updatedAt         DateTime      @updatedAt
+
+  enrollments            Enrollment[]
+  payments               Payment[]
+  attendances            Attendance[]
+  invoices               Invoice[]
+  alumni                 Alumni?
+  sessionStudentMessages SessionStudentMessage[]
+  nicSearchTokens        StudentNicSearchToken[]
+  nameSearchTokens       StudentNameSearchToken[]
+  documents              StudentDocument[]
+  modelingInterests      StudentModelingInterest[]
+
+  @@index([createdAt])
+  @@index([preferredBranchId])
+  @@index([source])
+  @@index([skinColorOptionId])
+  @@map("students")
+}
+
+model StudentNicSearchToken {
+  id        String  @id @default(cuid())
+  studentId String
+  student   Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  tokenHash String
+
+  @@unique([studentId, tokenHash])
+  @@index([tokenHash])
+  @@map("student_nic_search_tokens")
+}
+
+model StudentNameSearchToken {
+  id        String  @id @default(cuid())
+  studentId String
+  student   Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  tokenHash String
+
+  @@unique([studentId, tokenHash])
+  @@index([tokenHash])
+  @@map("student_name_search_tokens")
+}
+
+enum StudentDocumentType {
+  NIC_FRONT
+  NIC_BACK
+  PROFESSIONAL_PHOTO
+}
+
+model StudentDocument {
+  id          String              @id @default(cuid())
+  studentId   String
+  student     Student             @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  type        StudentDocumentType
+  storagePath String
+  mimeType    String
+  sortOrder   Int                 @default(0)
+  createdAt   DateTime            @default(now())
+
+  @@index([studentId, type])
+  @@map("student_documents")
+}
+
+model RegistrationSkinColorOption {
+  id        String   @id @default(cuid())
+  label     String
+  sortOrder Int      @default(0)
+  isActive  Boolean  @default(true)
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  students Student[]
+
+  @@map("registration_skin_color_options")
+}
+
+model RegistrationModelingInterestOption {
+  id        String   @id @default(cuid())
+  label     String
+  sortOrder Int      @default(0)
+  isActive  Boolean  @default(true)
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  studentInterests StudentModelingInterest[]
+
+  @@map("registration_modeling_interest_options")
+}
+
+model RegistrationEyeColorOption {
+  id        String   @id @default(cuid())
+  label     String
+  sortOrder Int      @default(0)
+  isActive  Boolean  @default(true)
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("registration_eye_color_options")
+}
+
+model RegistrationHairColorOption {
+  id        String   @id @default(cuid())
+  label     String
+  sortOrder Int      @default(0)
+  isActive  Boolean  @default(true)
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("registration_hair_color_options")
+}
+
+model StudentModelingInterest {
+  studentId String
+  optionId  String
+  student   Student                          @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  option    RegistrationModelingInterestOption @relation(fields: [optionId], references: [id], onDelete: Cascade)
+
+  @@id([studentId, optionId])
+  @@map("student_modeling_interests")
+}
+
+// ── ALUMNI ───────────────────────────────────────────────────────
+// One row per student. Re-graduating from another intake updates batchId
+// and moves the prior batch to previousBatchId.
+
+model Alumni {
+  id              String   @id @default(cuid())
+  studentId       String   @unique
+  student         Student  @relation(fields: [studentId], references: [id])
+  batchId         String
+  batch           Batch    @relation("AlumniBatch", fields: [batchId], references: [id])
+  previousBatchId String?
+  previousBatch   Batch?   @relation("AlumniPreviousBatch", fields: [previousBatchId], references: [id])
+  graduatedAt     DateTime
+  notes           String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([batchId])
+  @@index([graduatedAt])
+  @@map("alumni")
+}
+
+// ── ENROLLMENT ───────────────────────────────────────────────────
+// Links a student to a batch.
+// batchId is nullable — UNASSIGNED students have no batch yet.
+// One student can have multiple enrollments (cross-branch edge case).
+
+model Enrollment {
+  id              String           @id @default(cuid())
+  studentId       String
+  student         Student          @relation(fields: [studentId], references: [id])
+  batchId         String?          // nullable until admin assigns batch
+  batch           Batch?           @relation(fields: [batchId], references: [id])
+  status          EnrollmentStatus @default(UNASSIGNED)
+  customCourseFee Decimal?               @db.Decimal(10,2)  // overrides batch.courseFee
+  paymentPath     EnrollmentPaymentPath?
+  installmentSource EnrollmentInstallmentSource @default(BATCH)
+  paymentPlanId   String?
+  paymentPlan     PaymentPlan?           @relation(fields: [paymentPlanId], references: [id])
+  regFeePaid         Boolean                @default(false)
+  regFeeReceiptUrl   String?                // URL to uploaded registration fee receipt
+  notesEnc        String?          @db.Text
+  notes           String?          @db.Text
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+
+  installments              Installment[]
+  transferSettlementsFrom   TransferSettlement[] @relation("TransferSettlementSource")
+  transferSettlementsTo     TransferSettlement[] @relation("TransferSettlementTarget")
+
+  @@unique([studentId, batchId])
+  @@index([studentId])
+  @@index([studentId, status])
+  @@index([batchId, status])
+  @@index([paymentPlanId])
+  @@map("enrollments")
+}
+
+// ── TRANSFER SETTLEMENT ──────────────────────────────────────────
+// Audit when a student transfers batch and prior payments need handling.
+
+model TransferSettlement {
+  id                 String                 @id @default(cuid())
+  sourceEnrollmentId String
+  sourceEnrollment   Enrollment             @relation("TransferSettlementSource", fields: [sourceEnrollmentId], references: [id])
+  targetEnrollmentId String?
+  targetEnrollment   Enrollment?            @relation("TransferSettlementTarget", fields: [targetEnrollmentId], references: [id])
+  kind               TransferSettlementKind
+  amount             Decimal                @db.Decimal(10, 2)
+  appliedAmount      Decimal?               @db.Decimal(10, 2)
+  notesEnc           String?                @db.Text
+  notes              String?                @db.Text
+  recordedById       String
+  recordedBy         Admin                  @relation(fields: [recordedById], references: [id])
+  createdAt          DateTime               @default(now())
+
+  @@index([sourceEnrollmentId])
+  @@index([targetEnrollmentId])
+  @@map("transfer_settlements")
+}
+
+// ── INSTALLMENT ──────────────────────────────────────────────────
+// Copied from InstallmentTemplate when student is enrolled.
+// Amount can be adjusted per student by admin.
+
+model Installment {
+  id           String            @id @default(cuid())
+  enrollmentId String
+  enrollment   Enrollment        @relation(fields: [enrollmentId], references: [id])
+  label        String
+  amount       Decimal           @db.Decimal(10,2)  // target amount
+  dueDate      DateTime
+  paidAmount            Decimal           @default(0) @db.Decimal(10,2)
+  overdueCharge         Decimal           @default(0) @db.Decimal(10,2)
+  overdueChargePaid     Decimal           @default(0) @db.Decimal(10,2)
+  overdueChargeAppliedAt DateTime?
+  overdueChargeWaived    Boolean           @default(false)
+  status                InstallmentStatus @default(PENDING)
+  order                 Int
+  createdAt             DateTime          @default(now())
+  updatedAt             DateTime          @updatedAt
+
+  payments Payment[]
+
+  @@index([enrollmentId])
+  @@index([status, dueDate])
+  @@index([enrollmentId, status])
+  @@map("installments")
+}
+
+// ── PAYMENT ──────────────────────────────────────────────────────
+
+model Payment {
+  id            String        @id @default(cuid())
+  studentId     String
+  student       Student       @relation(fields: [studentId], references: [id])
+  installmentId String?       // null = registration fee or misc payment
+  installment   Installment?  @relation(fields: [installmentId], references: [id])
+  amount        Decimal       @db.Decimal(10,2)
+  paymentDate   DateTime      @default(now())
+  method        PaymentMethod
+  paymentTag    String?       // system marker e.g. REG_FEE:<enrollmentId> (not user PII)
+  referenceEnc  String?
+  notesEnc      String?       @db.Text
+  voidReasonEnc String?       @db.Text
+  reference     String?
+  notes         String?       @db.Text
+  voidReason    String?
+  recordedById  String
+  recordedBy    Admin         @relation("PaymentRecordedBy", fields: [recordedById], references: [id])
+  voidedAt      DateTime?
+  voidedById    String?
+  voidedBy      Admin?        @relation("PaymentVoidedBy", fields: [voidedById], references: [id])
+  createdAt     DateTime      @default(now())
+
+  @@index([paymentTag])
+
+  invoice Invoice?
+
+  @@index([paymentDate])
+  @@index([installmentId])
+  @@index([studentId, paymentDate])
+  @@index([voidedAt])
+  @@map("payments")
+}
+
+// ── INVOICE ──────────────────────────────────────────────────────
+
+model Invoice {
+  id            String   @id @default(cuid())
+  invoiceNumber String   @unique  // INV-2025-0001 (auto-incremented)
+  studentId     String
+  student       Student  @relation(fields: [studentId], references: [id])
+  paymentId     String   @unique
+  payment       Payment  @relation(fields: [paymentId], references: [id])
+  amount        Decimal  @db.Decimal(10,2)
+  pdfUrl          String?  
+  pdfContentHash  String?  // SHA-256 of invoice payload — invalidates cache when data changes
+  pdfUploadStatus String?  @default("PENDING") // PENDING | READY | FAILED
+  pdfUploadError  String?
+  generatedAt     DateTime @default(now())
+
+  @@map("invoices")
+}
+
+// ── ATTENDANCE ───────────────────────────────────────────────────
+// One record per student per session.
+// Cross-branch detected when session.branchId != student enrollment batch branchId.
+
+model Attendance {
+  id               String           @id @default(cuid())
+  studentId        String
+  student          Student          @relation(fields: [studentId], references: [id])
+  sessionId        String
+  session          Session          @relation(fields: [sessionId], references: [id])
+  attendanceStatus AttendanceStatus @default(PRESENT)
+  source           AttendanceSource @default(STUDENT)
+  markedAt         DateTime         @default(now())
+  notes            String?
+
+  @@unique([studentId, sessionId])
+  @@index([studentId])
+  @@index([sessionId, attendanceStatus])
+  @@map("attendances")
+}
+
+// ── WEBHOOK LOG ──────────────────────────────────────────────────
+// Audit trail for all incoming webhook POSTs from the external website.
+// We give the endpoint URL to the other company.
+// They POST to it when a student is approved in their dashboard.
+
+model WebhookLog {
+  id         String   @id @default(cuid())
+  payloadEnc String?  @db.Text
+  payload    Json?
+  studentId  String?
+  status     String
+  error      String?
+  receivedAt DateTime @default(now())
+
+  @@map("webhook_logs")
+}
+
+// ── ACADEMY SETTINGS (singleton) ─────────────────────────────────
+
+model AcademySettings {
+  id                     String   @id @default("default")
+  academyName            String   @default("Walk Model Agency")
+  contactEmail           String?
+  contactPhone           String?
+  address                String?
+  currency               String   @default("LKR")
+  timezone               String   @default("Asia/Colombo")
+  defaultRegistrationFee Decimal  @default(0) @db.Decimal(10, 2)
+  defaultCourseFee       Decimal  @default(0) @db.Decimal(10, 2)
+  logoUrl                String?
+  invoiceHeader          String?
+  invoiceFooter          String?
+  invoiceTerms           String?  @db.Text
+  invoiceNumberPrefix         String   @default("INV")
+  invoicePaymentMethodLabel String?  // e.g. "Bank Transfer"
+  invoiceBankName             String?
+  invoiceBankAccountNumber    String?
+  invoiceBankAccountName      String?
+  invoiceBankBranch           String?
+  overdueChargeEnabled        Boolean  @default(false)
+  overdueChargeAmount         Decimal  @default(2500) @db.Decimal(10, 2)
+  overdueChargeEnabledSince   DateTime?
+  attendanceWindowBeforeMinutes Int    @default(60)
+  attendanceWindowAfterMinutes  Int    @default(120)
+  attendancePinLength           Int    @default(4)
+  notificationLookaheadDays     Int    @default(7)
+  updatedAt                   DateTime @updatedAt
+
+  @@map("academy_settings")
+}
+
+model SessionStudentMessage {
+  id         String    @id @default(cuid())
+  sessionId  String
+  session    Session   @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  studentId  String
+  student    Student   @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  notice     String?   @db.Text
+  body       String    @db.Text
+  templateId String?
+  sentAt     DateTime  @default(now())
+  readAt     DateTime?
+  smsSent    Boolean   @default(false)
+
+  @@index([studentId, sentAt(sort: Desc)])
+  @@index([sessionId])
+  @@map("session_student_messages")
+}
+
+model SessionSmsTemplate {
+  id        String   @id @default(cuid())
+  name      String
+  body      String   @db.Text
+  isDefault Boolean  @default(false)
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@map("session_sms_templates")
+}
+
+model PaymentPlan {
+  id                    String   @id @default(cuid())
+  name                  String
+  isDefault             Boolean  @default(false)
+  isActive              Boolean  @default(true)
+  registrationFee       Decimal  @db.Decimal(10, 2)
+  courseFee             Decimal  @db.Decimal(10, 2)
+  oneTimeDiscountAmount Decimal  @db.Decimal(10, 2)
+  sortOrder             Int      @default(0)
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  lineItems    PaymentPlanLineItem[]
+  batches      Batch[]
+  enrollments  Enrollment[]
+
+  @@map("payment_plans")
+}
+
+model PaymentPlanLineItem {
+  id        String      @id @default(cuid())
+  planId    String
+  plan      PaymentPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  label     String
+  amount    Decimal     @db.Decimal(10, 2)
+  order     Int
+  createdAt DateTime    @default(now())
+
+  @@index([planId])
+  @@map("payment_plan_line_items")
+}

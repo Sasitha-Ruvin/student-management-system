@@ -1,0 +1,91 @@
+/**
+ * Walk Model Agency — design tokens
+ * Single source of truth for colors, typography, and radii.
+ */
+
+:root {
+  /* ── Base palette ───────────────────────────────────────────── */
+  --palette-primary: #000000;
+  --palette-secondary: #dcd7cc;
+  --palette-tertiary: #f5f5f0;
+  --palette-neutral: #999999;
+
+  /* ── Primary scale (black) ──────────────────────────────────── */
+  --color-primary-100: #f5f5f5;
+  --color-primary-200: #e5e5e5;
+  --color-primary-300: #cccccc;
+  --color-primary-400: #b3b3b3;
+  --color-primary-500: #999999;
+  --color-primary-600: #808080;
+  --color-primary-700: #666666;
+  --color-primary-800: #333333;
+  --color-primary-900: #000000;
+
+  /* ── Secondary scale (greige) ───────────────────────────────── */
+  --color-secondary-100: #faf9f7;
+  --color-secondary-200: #f3f1ed;
+  --color-secondary-300: #ebe8e3;
+  --color-secondary-400: #e3dfd8;
+  --color-secondary-500: #dcd7cc;
+  --color-secondary-600: #c4bfb4;
+  --color-secondary-700: #ada89d;
+  --color-secondary-800: #969186;
+  --color-secondary-900: #7f7a70;
+
+  /* ── Tertiary scale (off-white / cream) ─────────────────────── */
+  --color-tertiary-100: #ffffff;
+  --color-tertiary-200: #fcfcfa;
+  --color-tertiary-300: #f9f9f5;
+  --color-tertiary-400: #f7f7f2;
+  --color-tertiary-500: #f5f5f0;
+  --color-tertiary-600: #e8e8e3;
+  --color-tertiary-700: #dbdbd6;
+  --color-tertiary-800: #cecec9;
+  --color-tertiary-900: #c1c1bc;
+
+  /* ── Neutral scale (grey) ───────────────────────────────────── */
+  --color-neutral-100: #f2f2f2;
+  --color-neutral-200: #e0e0e0;
+  --color-neutral-300: #cccccc;
+  --color-neutral-400: #b3b3b3;
+  --color-neutral-500: #999999;
+  --color-neutral-600: #808080;
+  --color-neutral-700: #666666;
+  --color-neutral-800: #4d4d4d;
+  --color-neutral-900: #333333;
+
+  /* ── Accent (from UI kit) ───────────────────────────────────── */
+  --color-destructive: #c94c4c;
+  --color-destructive-foreground: #ffffff;
+  --color-accent-olive: #6b6b47;
+  --color-accent-olive-foreground: #ffffff;
+
+  /* ── Semantic aliases ───────────────────────────────────────── */
+  --background: var(--color-tertiary-500);
+  --foreground: var(--color-primary-900);
+  --surface: var(--color-secondary-500);
+  --surface-elevated: var(--color-tertiary-100);
+  --border: var(--color-secondary-600);
+  --border-subtle: var(--color-secondary-400);
+  --muted: var(--color-neutral-500);
+  --muted-foreground: var(--color-neutral-700);
+
+  /* Buttons */
+  --button-primary-bg: var(--color-primary-900);
+  --button-primary-fg: var(--color-tertiary-100);
+  --button-secondary-bg: var(--color-secondary-500);
+  --button-secondary-fg: var(--color-primary-900);
+  --button-outline-border: var(--color-primary-900);
+  --button-outline-fg: var(--color-primary-900);
+
+  /* ── Typography ─────────────────────────────────────────────── */
+  --font-family-headline: var(--font-playfair), "Playfair Display", Georgia, serif;
+  --font-family-body: var(--font-inter), "Inter", system-ui, sans-serif;
+
+  /* ── Radii (bento / rounded UI) ─────────────────────────────── */
+  --radius-sm: 0.375rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+  --radius-xl: 1rem;
+  --radius-full: 9999px;
+}
